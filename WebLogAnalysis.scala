@@ -57,8 +57,11 @@ object WebLogAnalysis extends App {
     .schema(customSchema)
     // read the actual file
     .load(fn)
-    // in case we need the IP independent from port we split here into two separate columns
-    //.withColumn("client_ip",split(col("client:port"),":").getItem(0))
+    // the description often speaks of IP
+    // I am not sure whether doing any aggregation after IP is a good idea, since NATed IPs will be all
+    // thrown into the same pot, so better aggregate always after IP:port
+    // But for description's sake, add the IP only column
+    .withColumn("client_ip",split(col("client:port"),":").getItem(0))
     //.withColumn("client_port",split(col("client:port"),":").getItem(1))
     // same for server ip/port
     //.withColumn("backend_ip",split(col("backend:port"),":").getItem(0))
@@ -78,7 +81,7 @@ object WebLogAnalysis extends App {
     .withColumn("session_id",create_session_id(col("client:port"), col("session_idx_per_user")))
     // we need:
     // - time for average session time
-    .select("time", "epoch", "diff", "session_id", "client:port", "url")
+    .select("time", "epoch", "diff", "client_ip", "session_id", "client:port", "url")
     // for debugging use this instead
     // .select("epoch", "time", "new_session", "session_idx_per_user", "session_id", "client:port", "url", "user_agent")
     // cache the data for multiple aggregations
@@ -98,8 +101,12 @@ object WebLogAnalysis extends App {
   // compute session time by summing up the diff values within a session
   val sessionTimeDf = df.withColumn("session_time_incr", sum(when(col("diff").isNull,0).otherwise(col("diff"))).over(bySessionId))
     .groupBy("session_id")
-    .max("session_time_incr")
+    .agg(
+      max("session_time_incr"),
+      first("client_ip")        // we cannot add arbitrary columns, but we know the IP is the same, add the first
+    )
     .withColumnRenamed("max(session_time_incr)", "session_time")
+    .withColumnRenamed("first(client_ip)", "client_ip")
     .cache()
 
   // show the session times
@@ -110,7 +117,15 @@ object WebLogAnalysis extends App {
   sessionTimeDf.select(mean("session_time")).show()
 
   // compute the number of distinct URLs visited per session
-  df.groupBy("session_id").agg(countDistinct("url")).show(50, false)
+  val uniqueURLcountsBySession = df.groupBy("session_id")
+    .agg(
+      first("client_ip"), // we add client IP here to mage aggregation easier
+      countDistinct("url")
+    )
+    .withColumnRenamed("first(client_ip)", "client_ip")
+    .withColumnRenamed("count(url)", "unique_url_count")
+
+  uniqueURLcountsBySession.show(50, false)
 
   // get the session id of the longest session (which is IP:port:session_nr)
   Console.println(sessionTimeDf.orderBy(desc("session_time")).first().get(0))
@@ -129,7 +144,9 @@ object WebLogAnalysis extends App {
   ).select(mean("rps")).show()
 
   // Predict the session length for a given IP
-  // By IP? or IP:port? What about NATed connections, there would be lots of 
-  // different people from the same IP but different ports?
+  sessionTimeDf.groupBy("client_ip").agg(mean("session_time")).show(50,false)
 
+  // Predict the number of unique URL visits by a given IP
+  // I guess what is mean is the number of unique URLs per session per IP
+  uniqueURLcountsBySession.groupBy("client_ip").agg(mean("unique_url_count")).show(50,false)
 }
