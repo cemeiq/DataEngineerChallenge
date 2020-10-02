@@ -19,6 +19,8 @@ object WebLogAnalysis extends App {
   // but this should NOT be used in general since gzip files
   // are not splittable!!!
   val fn = "data/2015_07_22_mktplace_shop_web_log_sample.log.gz"
+  // small file with bogus data to check resilience to errors
+  // val fn = "data/min.log"
 
   // define a schema for the log file data define by AWS in
   // http://docs.aws.amazon.com/ElasticLoadBalancing/latest/DeveloperGuide/access-log-collection.html#access-log-entry-format
@@ -57,6 +59,13 @@ object WebLogAnalysis extends App {
     .schema(customSchema)
     // read the actual file
     .load(fn)
+    // if any field is null, then it couldn't be parsed according to the above
+    // schema, so better drop it
+    // we drop another time down there after splitting the request, so do it only once
+    // .na.drop()
+    // filter out rows with client:port that do not match the format
+    // we might also check that the part before the : is an actual IP address?
+    .filter(col("client:port").contains(":"))
     // the description often speaks of IP
     // I am not sure whether doing any aggregation after IP is a good idea, since NATed IPs will be all
     // thrown into the same pot, so better aggregate always after IP:port
@@ -68,10 +77,13 @@ object WebLogAnalysis extends App {
     //.withColumn("backend_port",split(col("backend:port"),":").getItem(1))
     // get the request URL (and if necessary the http method (GET/POST)
     .withColumn( "url", split(col("request"), pattern=" ").getItem(key=1))
+    // see above concerning dropping rows with nan/null
+    .na.drop()
     //.withColumn( "method", split(col("request"), pattern=" ").getItem(key=0))
     // add a column with the timestamp converted to secs since epoch
     .withColumn("epoch", unix_timestamp($"time"))
     // build the relative time distance between request times per user
+    // this creates null entries at the first entry for an ip:port
     .withColumn("diff", col("epoch").minus(lag(col("epoch"),1).over(byClientPortOrderedByEpoch)))
     // tag those lines where there is a difference larger than 15min (in secs) as new session
     .withColumn("new_session", when(col("diff").isNull, 1).otherwise(checkNewSession(col("diff"))) )
