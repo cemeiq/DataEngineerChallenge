@@ -7,8 +7,8 @@ import org.apache.spark.sql.Row._
 
 object WebLogAnalysis extends App {
 
-  // Turn of spark logging
-  Logger.getLogger("org").setLevel(Level.OFF)
+  // Only issue warnings and errors
+  Logger.getLogger("org").setLevel(Level.WARN)
 
   // usual spark incantation
   val spark = SparkSession.builder().appName("WebLogAnalysis").master("local[*]").getOrCreate()
@@ -70,13 +70,13 @@ object WebLogAnalysis extends App {
     // I am not sure whether doing any aggregation after IP is a good idea, since NATed IPs will be all
     // thrown into the same pot, so better aggregate always after IP:port
     // But for description's sake, add the IP only column
-    .withColumn("client_ip",split(col("client:port"),":").getItem(0))
+    .withColumn("client_ip",split($"client:port",":").getItem(0))
     //.withColumn("client_port",split(col("client:port"),":").getItem(1))
     // same for server ip/port
     //.withColumn("backend_ip",split(col("backend:port"),":").getItem(0))
     //.withColumn("backend_port",split(col("backend:port"),":").getItem(1))
     // get the request URL (and if necessary the http method (GET/POST)
-    .withColumn( "url", split(col("request"), pattern=" ").getItem(key=1))
+    .withColumn( "url", split($"request", pattern=" ").getItem(key=1))
     // see above concerning dropping rows with nan/null
     .na.drop()
     //.withColumn( "method", split(col("request"), pattern=" ").getItem(key=0))
@@ -84,13 +84,13 @@ object WebLogAnalysis extends App {
     .withColumn("epoch", unix_timestamp($"time"))
     // build the relative time distance between request times per user
     // this creates null entries at the first entry for an ip:port
-    .withColumn("diff", col("epoch").minus(lag(col("epoch"),1).over(byClientPortOrderedByEpoch)))
+    .withColumn("diff", $"epoch".minus(lag($"epoch",1).over(byClientPortOrderedByEpoch)))
     // tag those lines where there is a difference larger than 15min (in secs) as new session
-    .withColumn("new_session", when(col("diff").isNull, 1).otherwise(checkNewSession(col("diff"))) )
+    .withColumn("new_session", when($"diff".isNull, 1).otherwise(checkNewSession($"diff")) )
     // add a session idx (per user) column by adding up the values of new_session column (per user)
     .withColumn("session_idx_per_user",sum("new_session").over(byClientPortOrderedByEpoch).cast("string"))
     // create the session id from the user id (client:port) and the session index per user
-    .withColumn("session_id",create_session_id(col("client:port"), col("session_idx_per_user")))
+    .withColumn("session_id",create_session_id($"client:port", $"session_idx_per_user"))
     // we need:
     // - time for average session time
     .select("time", "epoch", "diff", "client_ip", "session_id", "client:port", "url")
@@ -111,7 +111,7 @@ object WebLogAnalysis extends App {
   val bySessionId = Window.partitionBy("session_id").orderBy('epoch)
 
   // compute session time by summing up the diff values within a session
-  val sessionTimeDf = df.withColumn("session_time_incr", sum(when(col("diff").isNull,0).otherwise(col("diff"))).over(bySessionId))
+  val sessionTimeDf = df.withColumn("session_time_incr", sum(when($"diff".isNull,0).otherwise($"diff")).over(bySessionId))
     .groupBy("session_id")
     .agg(
       max("session_time_incr"),
